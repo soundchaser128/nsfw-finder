@@ -2,6 +2,7 @@
 name = "nsfw-finder"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/soundchaser128/nsfw-finder"
 
 [dependencies]
 camino = "1.1.7"
@@ -13,3 +14,23 @@ num_cpus = "1.16.0"
 ordered-float = "4.2.2"
 rayon = "1.10.0"
 walkdir = "2.5.0"
+
+# The profile that 'cargo dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'cargo dist'
+[workspace.metadata.dist]
+# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.21.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
