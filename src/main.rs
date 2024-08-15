@@ -40,11 +40,16 @@ struct Args {
     #[clap(short = 'd', long = "destination")]
     pub nsfw_folder: Utf8PathBuf,
 
+    /// Threshold for detecting something as NSFW. Can be between 0 and 1,
+    /// 1 being 100% certain that it's NSFW.
+    #[clap(short, long, default_value = "0.5")]
+    pub threshold: f32,
+
     /// Folder to get the images from
     pub source_folder: Utf8PathBuf,
 }
 
-fn is_nsfw(classifications: &[Classification]) -> bool {
+fn is_nsfw(classifications: &[Classification], threshold: f32) -> bool {
     const METRICS: [Metric; 3] = [Metric::Hentai, Metric::Porn, Metric::Sexy];
     let score_max = classifications
         .iter()
@@ -53,7 +58,7 @@ fn is_nsfw(classifications: &[Classification]) -> bool {
         .map(|s| s.score)
         .unwrap_or(0.0);
 
-    score_max > 0.5
+    score_max > threshold
 }
 
 fn collect_paths(source: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
@@ -93,12 +98,17 @@ fn find_non_conflicting_file_name(dir: &Utf8Path, file_name: &str) -> Result<Str
     }
 }
 
-fn copy_image_if_nsfw(path: &Utf8Path, destination_dir: &Utf8Path, dry_run: bool) -> Result<bool> {
+fn copy_image_if_nsfw(
+    path: &Utf8Path,
+    destination_dir: &Utf8Path,
+    dry_run: bool,
+    threshold: f32,
+) -> Result<bool> {
     let image = image::open(path)?;
     let image = image.into_rgba8();
 
     let result = examine(&MODEL, &image).map_err(|e| eyre!("failed to examine image: {e}"))?;
-    let is_nsfw = is_nsfw(&result);
+    let is_nsfw = is_nsfw(&result, threshold);
 
     if is_nsfw {
         let file_name = find_non_conflicting_file_name(
@@ -129,15 +139,15 @@ fn main() -> Result<()> {
     image_paths
         .into_par_iter()
         .progress_count(len)
-        .for_each(
-            |path| match copy_image_if_nsfw(&path, &args.nsfw_folder, args.dry_run) {
+        .for_each(|path| {
+            match copy_image_if_nsfw(&path, &args.nsfw_folder, args.dry_run, args.threshold) {
                 Ok(true) => {
                     nsfw_count.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(false) => {}
                 Err(e) => eprintln!("failed to check or move file {path}: {e}"),
-            },
-        );
+            }
+        });
 
     println!(
         "Processed {} images, {} were NSFW and moved to {}",
