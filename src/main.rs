@@ -1,8 +1,15 @@
-use std::{io::Cursor, sync::LazyLock};
+use std::{
+    io::Cursor,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock,
+    },
+};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use color_eyre::{eyre::eyre, Result};
+use indicatif::ParallelProgressIterator;
 use nsfw::{
     create_model, examine,
     model::{Classification, Metric},
@@ -86,7 +93,7 @@ fn find_non_conflicting_file_name(dir: &Utf8Path, file_name: &str) -> Result<Str
     }
 }
 
-fn copy_image_if_nsfw(path: &Utf8Path, destination_dir: &Utf8Path, dry_run: bool) -> Result<()> {
+fn copy_image_if_nsfw(path: &Utf8Path, destination_dir: &Utf8Path, dry_run: bool) -> Result<bool> {
     let image = image::open(path)?;
     let image = image.into_rgba8();
 
@@ -99,15 +106,12 @@ fn copy_image_if_nsfw(path: &Utf8Path, destination_dir: &Utf8Path, dry_run: bool
             path.file_name().expect("file must have file name"),
         )?;
         let dest = destination_dir.join(file_name);
-        if dry_run {
-            println!("Copying file {path} to {dest} (dry run)");
-        } else {
-            println!("Copying file {path} -> {dest}");
+        if !dry_run {
             std::fs::copy(path, dest)?;
         }
     }
 
-    Ok(())
+    Ok(is_nsfw)
 }
 
 fn main() -> Result<()> {
@@ -118,12 +122,29 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&args.nsfw_folder)?;
     let image_paths = collect_paths(&args.source_folder)?;
+    let len = image_paths.len() as u64;
+    println!("found {len} files in {}", args.source_folder);
+    let nsfw_count = AtomicU64::new(0);
 
-    image_paths.into_par_iter().for_each(|path| {
-        if let Err(e) = copy_image_if_nsfw(&path, &args.nsfw_folder, args.dry_run) {
-            eprintln!("failed to check or move file {path}: {e}");
-        }
-    });
+    image_paths
+        .into_par_iter()
+        .progress_count(len)
+        .for_each(
+            |path| match copy_image_if_nsfw(&path, &args.nsfw_folder, args.dry_run) {
+                Ok(true) => {
+                    nsfw_count.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("failed to check or move file {path}: {e}"),
+            },
+        );
+
+    println!(
+        "Processed {} images, {} were NSFW and moved to {}",
+        len,
+        nsfw_count.load(Ordering::SeqCst),
+        args.nsfw_folder
+    );
 
     Ok(())
 }

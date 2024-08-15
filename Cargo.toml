@@ -9,6 +9,7 @@ camino = "1.1.7"
 clap = { version = "4.5.15", features = ["derive"] }
 color-eyre = "0.6.3"
 image = "0.25.2"
+indicatif = { version = "0.17.8", features = ["rayon"] }
 nsfw = "0.2.0"
 num_cpus = "1.16.0"
 ordered-float = "4.2.2"
