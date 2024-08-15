@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         LazyLock,
     },
+    time::Instant,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -126,9 +127,12 @@ fn copy_image_if_nsfw(
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let n_threads = args.num_threads.unwrap_or(num_cpus::get());
+    println!("Running with {n_threads} threads.");
     rayon::ThreadPoolBuilder::new()
-        .num_threads(args.num_threads.unwrap_or(num_cpus::get()))
+        .num_threads(n_threads)
         .build_global()?;
+    let start = Instant::now();
 
     std::fs::create_dir_all(&args.nsfw_folder)?;
     let image_paths = collect_paths(&args.source_folder)?;
@@ -148,13 +152,15 @@ fn main() -> Result<()> {
                 Err(e) => eprintln!("failed to check or move file {path}: {e}"),
             }
         });
+    let elapsed = start.elapsed();
 
     println!(
-        "Processed {} images, {} were NSFW and moved to {}",
+        "Processed {} images, {} of which were classified as NSFW and moved to destination '{}'",
         len,
         nsfw_count.load(Ordering::SeqCst),
         args.nsfw_folder
     );
+    println!("Elapsed time: {elapsed:?}");
 
     Ok(())
 }
