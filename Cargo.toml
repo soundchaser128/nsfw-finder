@@ -41,4 +41,4 @@ install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
 
-local-artifacts-jobs = ["./download-model"]
+github-build-setup = "download-model.yml"

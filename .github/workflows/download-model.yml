@@ -1,17 +1,2 @@
-name: Download Model
-
-on:
-  workflow_call:
-    inputs:
-      plan:
-        required: false
-        type: string
-
-jobs:
-  download-model:
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Download Model
-        run: gh release download -R Fyko/nsfw --pattern "model.onnx"
+- name: Download Model
+  run: gh release download -R Fyko/nsfw --pattern "model.onnx"

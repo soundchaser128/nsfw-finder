@@ -115,6 +115,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: "Download Model"
+        run: "gh release download -R Fyko/nsfw --pattern \"model.onnx\""
       - name: Install cargo-dist
         run: ${{ matrix.install_dist }}
       # Get the dist-manifest
@@ -153,21 +155,11 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
-  custom-download-model:
-    needs:
-      - plan
-    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}
-    uses: ./.github/workflows/download-model.yml
-    with:
-      plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit
-
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
     needs:
       - plan
       - build-local-artifacts
-      - custom-download-model
     runs-on: "ubuntu-20.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -213,10 +205,9 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-      - custom-download-model
       - build-global-artifacts
     # Only run if we're "publishing", and only if local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-download-model.result == 'skipped' || needs.custom-download-model.result == 'success') }}
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-20.04"
