@@ -1,0 +1,15 @@
+name: Download Model
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  download-model:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Model
+        run: gh release download -R Fyko/nsfw --pattern "model.onnx"
