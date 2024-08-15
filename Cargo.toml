@@ -41,4 +41,4 @@ install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
 
-plan-jobs = ["./download-model"]
+local-artifacts-jobs = ["./download-model"]
