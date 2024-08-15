@@ -10,6 +10,8 @@ on:
 jobs:
   download-model:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Download Model
         run: gh release download -R Fyko/nsfw --pattern "model.onnx"
