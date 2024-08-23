@@ -11,7 +11,7 @@ use std::{
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{eyre::eyre, owo_colors::OwoColorize, Result};
 use indicatif::ParallelProgressIterator;
 use nsfw::{create_model, examine, model::Metric, Model};
 use ordered_float::OrderedFloat;
@@ -218,7 +218,11 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&args.nsfw_folder)?;
     let image_paths = collect_paths(&args.source_folder)?;
     let len = image_paths.len() as u64;
-    println!("found {len} files in {}", args.source_folder);
+    println!(
+        "found {} files in {}",
+        len.bold(),
+        args.source_folder.bold()
+    );
     let nsfw_count = AtomicU64::new(0);
 
     let results: Vec<_> = image_paths
@@ -251,11 +255,13 @@ fn main() -> Result<()> {
             };
 
             if !args.dry_run {
-                println!("Moving '{path}' -> '{dest}'");
+                println!("Moving {} -> {}", path.bold(), dest.bold());
                 std::fs::copy(&path, &dest)?;
             } else {
-                println!("Would move '{path}' -> '{dest}'");
+                println!("Would move {} -> {}", path.bold(), dest.bold());
             }
+        } else {
+            println!("{} is not NSFW", path.bold());
         }
     }
 
@@ -265,9 +271,9 @@ fn main() -> Result<()> {
 
     println!(
         "Processed {} images, {} of which were classified as NSFW and moved to destination '{}'",
-        len,
-        nsfw_count.load(Ordering::SeqCst),
-        args.nsfw_folder
+        len.bold(),
+        nsfw_count.load(Ordering::SeqCst).bold(),
+        args.nsfw_folder.bold()
     );
     println!("Elapsed time: {elapsed:?}");
 
