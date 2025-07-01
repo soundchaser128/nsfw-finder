@@ -5,14 +5,14 @@ edition = "2021"
 repository = "https://github.com/soundchaser128/nsfw-finder"
 
 [dependencies]
-camino = "1.1.7"
-clap = { version = "4.5.15", features = ["derive"] }
-color-eyre = "0.6.3"
-image = "0.25.2"
-indicatif = { version = "0.17.8", features = ["rayon"] }
+camino = "1.1.10"
+clap = { version = "4.5.40", features = ["derive"] }
+color-eyre = "0.6.5"
+image = "0.25.6"
+indicatif = { version = "0.17.12", features = ["rayon"] }
 nsfw = "0.2.0"
-num_cpus = "1.16.0"
-ordered-float = "4.2.2"
+num_cpus = "1.17.0"
+ordered-float = "5.0.0"
 rayon = "1.10.0"
 walkdir = "2.5.0"
 

@@ -1,30 +1,40 @@
 use std::{
-    collections::BTreeMap,
-    hash::Hash,
-    io::Cursor,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        LazyLock,
-    },
+    collections::BTreeMap, fs, hash::Hash, io::Cursor, process::Command, sync::LazyLock,
     time::Instant,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::Parser;
-use color_eyre::{eyre::eyre, owo_colors::OwoColorize, Result};
-use indicatif::ParallelProgressIterator;
+use clap::{Parser, ValueEnum};
+use color_eyre::{
+    eyre::eyre,
+    owo_colors::{AnsiColors, OwoColorize},
+    Result,
+};
+use image::DynamicImage;
+use indicatif::{ParallelProgressIterator, ProgressStyle};
 use nsfw::{create_model, examine, model::Metric, Model};
 use ordered_float::OrderedFloat;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-const EXTENSIONS: &[&str] = &["png", "jpeg", "jpg", "webp", "jpe", "gif"];
-const MODEL: LazyLock<Model> = LazyLock::new(|| {
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpeg", "jpg", "webp", "jpe", "gif"];
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "flv", "wmv", "webm"];
+
+static MODEL: LazyLock<Model> = LazyLock::new(|| {
     let model = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/model.onnx"));
     let model = Cursor::new(model);
     create_model(model).expect("failed to create model")
 });
-const METRICS: [Metric; 3] = [Metric::Hentai, Metric::Porn, Metric::Sexy];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum)]
+pub enum GroupingStrategy {
+    /// Group by the NSFW metric, one folder per type
+    Category,
+
+    /// SFW or NSFW, one folder for each, this is the default
+    #[default]
+    NsfwOrSfw,
+}
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -36,13 +46,11 @@ struct Args {
     #[clap(long)]
     pub num_threads: Option<usize>,
 
-    /// Path to put the NSFW images
     #[clap(short = 'd', long = "destination")]
-    pub nsfw_folder: Utf8PathBuf,
+    pub destination: Utf8PathBuf,
 
-    /// Flatten the destination folders into a single folder.
-    #[clap(short, long)]
-    pub flatten: bool,
+    #[clap(short = 'g', long = "grouping")]
+    pub grouping_strategy: GroupingStrategy,
 
     /// Threshold for detecting something as NSFW. Can be between 0 and 1,
     /// 1 being 100% certain that it's NSFW.
@@ -110,17 +118,43 @@ impl FileResult {
 
         score_max > threshold
     }
+
+    // compute a running average of the classifications
+    pub fn merge(&mut self, result: FileResult) {
+        for (metric, score) in &mut self.classifications {
+            if let Some(new_score) = result.classifications.get(metric) {
+                *score = (*score + new_score) / 2.0;
+            }
+        }
+    }
 }
 
-fn collect_paths(source: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileType {
+    Image,
+    Video,
+}
+
+fn collect_paths(source: &Utf8Path) -> Result<Vec<(Utf8PathBuf, FileType)>> {
     let mut paths = vec![];
     for entry in WalkDir::new(source) {
         match entry {
             Ok(e) => {
                 let path = Utf8Path::from_path(e.path()).expect("path must be utf-8");
+                if path.is_dir() {
+                    continue;
+                }
+
                 if let Some(extension) = path.extension() {
-                    if EXTENSIONS.contains(&extension) {
-                        paths.push(path.to_owned());
+                    if VIDEO_EXTENSIONS.contains(&extension) {
+                        paths.push((path.to_owned(), FileType::Video));
+                    } else if IMAGE_EXTENSIONS.contains(&extension) {
+                        paths.push((path.to_owned(), FileType::Image));
+                    } else {
+                        eprintln!(
+                            "skipping file with unsupported extension: {}",
+                            path.file_name().unwrap().bold()
+                        );
                     }
                 }
             }
@@ -131,14 +165,17 @@ fn collect_paths(source: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     Ok(paths)
 }
 
-fn classify_image(path: impl AsRef<Utf8Path>) -> Result<FileResult> {
+fn classify_image_at_path(path: impl AsRef<Utf8Path>) -> Result<FileResult> {
     let image = image::open(path.as_ref())?;
+    classify_image(path, image)
+}
+
+fn classify_image(path: impl AsRef<Utf8Path>, image: DynamicImage) -> Result<FileResult> {
     let image = image.into_rgba8();
     let result = examine(&MODEL, &image).map_err(|e| eyre!("failed to examine image: {e}"))?;
 
     let classifications = result
         .iter()
-        .filter(|c| METRICS.contains(&c.metric))
         .map(|c| (HashableMetric::from(c.metric.clone()), c.score))
         .collect();
 
@@ -146,6 +183,78 @@ fn classify_image(path: impl AsRef<Utf8Path>) -> Result<FileResult> {
         path: path.as_ref().to_owned(),
         classifications,
     })
+}
+
+fn get_video_length(path: impl AsRef<Utf8Path>) -> Result<f32> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path.as_ref().as_str(),
+        ])
+        .output()?;
+
+    if output.status.success() {
+        let duration_str = String::from_utf8_lossy(&output.stdout);
+        duration_str
+            .trim()
+            .parse::<f32>()
+            .map_err(|e| eyre!("failed to parse video duration: {e}, output: {duration_str}"))
+    } else {
+        Err(eyre!(
+            "ffprobe failed with error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn extract_frame_from_video(path: impl AsRef<Utf8Path>, timestamp: f32) -> Result<DynamicImage> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-ss",
+            &timestamp.to_string(),
+            "-i",
+            path.as_ref().as_str(),
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "-",
+        ])
+        .output()?;
+    if output.status.success() {
+        image::load_from_memory(&output.stdout)
+            .map_err(|e| eyre!("failed to load image from ffmpeg output: {e}"))
+    } else {
+        Err(eyre!(
+            "ffmpeg failed with error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn classify_video(path: impl AsRef<Utf8Path>) -> Result<FileResult> {
+    let duration = get_video_length(&path)?;
+
+    let mut results = FileResult {
+        path: path.as_ref().to_owned(),
+        classifications: BTreeMap::new(),
+    };
+    // take 5 samples from the video and average the results
+    for i in 0..5 {
+        let timestamp = i as f32 * duration / 5.0;
+        let image = extract_frame_from_video(&path, timestamp)?;
+        let result = classify_image(&path, image)?;
+        results.merge(result);
+    }
+
+    Ok(results)
 }
 
 fn find_non_conflicting_file_name(dir: &Utf8Path, file_name: &str) -> Result<String> {
@@ -171,7 +280,7 @@ fn write_markdown_report(source_folder: &Utf8Path, results: &[FileResult]) -> Re
     output.push_str("# NSFW Report\n\n");
     output.push_str(&format!("## Source Folder: {source_folder}\n\n"));
 
-    if results.len() > 0 {
+    if !results.is_empty() {
         let metrics = results[0]
             .classifications
             .keys()
@@ -179,14 +288,14 @@ fn write_markdown_report(source_folder: &Utf8Path, results: &[FileResult]) -> Re
             .collect::<Vec<_>>()
             .join(" | ");
 
-        let header = format!("| File | {} |\n", metrics);
+        let header = format!("| File | {metrics} |\n");
         output += &header;
 
-        let separator = (0..METRICS.len())
-            .map(|_| "---")
-            .collect::<Vec<_>>()
-            .join(" | ");
-        output += &format!("| --- | {separator} |\n");
+        // let separator = (0..METRICS.len())
+        //     .map(|_| "---")
+        //     .collect::<Vec<_>>()
+        //     .join(" | ");
+        // output += &format!("| --- | {separator} |\n");
 
         for result in results {
             let classifications = result
@@ -215,66 +324,136 @@ fn main() -> Result<()> {
         .build_global()?;
     let start = Instant::now();
 
-    std::fs::create_dir_all(&args.nsfw_folder)?;
-    let image_paths = collect_paths(&args.source_folder)?;
+    match args.grouping_strategy {
+        GroupingStrategy::Category => {
+            println!("Grouping by category, one folder per type.");
+            for category in [
+                Metric::Drawings,
+                Metric::Hentai,
+                Metric::Neutral,
+                Metric::Porn,
+                Metric::Sexy,
+            ] {
+                let folder = args.destination.join(category.to_string());
+                if !folder.exists() {
+                    std::fs::create_dir_all(&folder)?;
+                }
+            }
+        }
+        GroupingStrategy::NsfwOrSfw => {
+            let nsfw_folder = args.destination.join("nsfw");
+            let sfw_folder = args.destination.join("sfw");
+
+            fs::create_dir_all(&nsfw_folder)?;
+            fs::create_dir_all(&sfw_folder)?;
+        }
+    }
+
+    let mut image_paths = collect_paths(&args.source_folder)?;
+    image_paths.sort_by_key(|(path, _)| path.to_string());
     let len = image_paths.len() as u64;
     println!(
         "found {} files in {}",
         len.bold(),
         args.source_folder.bold()
     );
-    let nsfw_count = AtomicU64::new(0);
 
     let results: Vec<_> = image_paths
         .into_par_iter()
-        .progress_count(len)
-        .filter_map(|path| match classify_image(&path) {
-            Ok(result) => Some(result),
-            Err(e) => {
-                eprintln!("failed to classify image {path}: {e}");
-                None
-            }
+        //.progress_count(len)
+        .progress_with_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] (eta {eta}, {per_sec}) {wide_bar} {pos:>7}/{len:7} {msg}",
+            )
+            .unwrap(),
+        )
+        .filter_map(|(path, file_type)| match file_type {
+            FileType::Image => match classify_image_at_path(&path) {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    eprintln!("failed to classify image {path}: {e}");
+                    None
+                }
+            },
+            FileType::Video => match classify_video(&path) {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    eprintln!("failed to classify video {path}: {e}");
+                    None
+                }
+            },
         })
         .collect();
 
     for result in &results {
         let is_nsfw = result.is_nsfw(args.threshold);
         let path = &result.path;
-        if is_nsfw {
-            nsfw_count.fetch_add(1, Ordering::SeqCst);
-            let original_file_name = path.file_name().expect("file must have file name");
-            let dest = if args.flatten {
-                let file_name =
-                    find_non_conflicting_file_name(&args.nsfw_folder, original_file_name)?;
-                args.nsfw_folder.join(file_name)
-            } else {
-                let path_segments = path
-                    .strip_prefix(&args.source_folder)
-                    .expect("must be a prefix");
-                args.nsfw_folder.join(path_segments)
-            };
+        match args.grouping_strategy {
+            GroupingStrategy::Category => {
+                let Some((metric, confidence)) = result
+                    .classifications
+                    .iter()
+                    .max_by_key(|(_, v)| OrderedFloat(**v))
+                else {
+                    continue;
+                };
 
-            if !args.dry_run {
-                println!("Moving {} -> {}", path.bold(), dest.bold());
-                std::fs::copy(&path, &dest)?;
-            } else {
-                println!("Would move {} -> {}", path.bold(), dest.bold());
+                let destination = args.destination.join(metric.to_string());
+                let destination = {
+                    let original_file_name = path.file_name().expect("file must have file name");
+                    let file_name =
+                        find_non_conflicting_file_name(&destination, original_file_name)?;
+                    destination.join(file_name)
+                };
+
+                if args.dry_run {
+                    println!(
+                        "Classified '{}' as {} (confidence: {:.2}%), would move to '{}'",
+                        path.strip_prefix(&args.source_folder).unwrap().bold(),
+                        metric.bold().color(match metric {
+                            HashableMetric::Drawings => AnsiColors::Green,
+                            HashableMetric::Hentai => AnsiColors::Red,
+                            HashableMetric::Neutral => AnsiColors::Blue,
+                            HashableMetric::Porn => AnsiColors::Yellow,
+                            HashableMetric::Sexy => AnsiColors::Magenta,
+                        }),
+                        confidence * 100.0,
+                        destination.bold(),
+                    );
+                } else {
+                    fs::copy(&result.path, &destination)?;
+                    println!(
+                        "Copied '{}' to '{}'",
+                        path.bold(),
+                        destination.bold().color(match metric {
+                            HashableMetric::Drawings => AnsiColors::Green,
+                            HashableMetric::Hentai => AnsiColors::Red,
+                            HashableMetric::Neutral => AnsiColors::Blue,
+                            HashableMetric::Porn => AnsiColors::Yellow,
+                            HashableMetric::Sexy => AnsiColors::Magenta,
+                        })
+                    );
+                }
             }
-        } else {
-            println!("{} is not NSFW", path.bold());
+            GroupingStrategy::NsfwOrSfw => {
+                let destination = if is_nsfw {
+                    args.destination.join("nsfw")
+                } else {
+                    args.destination.join("sfw")
+                };
+
+                if args.dry_run {
+                    println!("Would move {} -> {}", path.bold(), destination.bold());
+                } else {
+                    fs::copy(&result.path, &destination)?;
+                }
+            }
         }
     }
 
-    write_markdown_report(&args.source_folder, &results)?;
+    // write_markdown_report(&args.source_folder, &results)?;
 
     let elapsed = start.elapsed();
-
-    println!(
-        "Processed {} images, {} of which were classified as NSFW and moved to destination '{}'",
-        len.bold(),
-        nsfw_count.load(Ordering::SeqCst).bold(),
-        args.nsfw_folder.bold()
-    );
     println!("Elapsed time: {elapsed:?}");
 
     Ok(())
